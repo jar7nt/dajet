@@ -99,7 +99,7 @@ namespace DaJet.Scripting
 
                 if (column.TypeName.StartsWith("char") || column.TypeName.StartsWith("text"))
                 {
-                    script.Append("CAST(").Append(column.Name).Append(" AS mvarchar)"); // table variable column trick
+                    script.Append("CAST(").Append(column.Name).Append(" AS text)");
                 }
                 else
                 {
@@ -247,7 +247,7 @@ namespace DaJet.Scripting
             }
             else if (node.Token == TokenType.String)
             {
-                script.Append($"CAST(\'{node.Literal}\' AS mvarchar)");
+                script.Append($"CAST(\'{node.Literal}\' AS text)");
             }
             else if (node.Token == TokenType.Uuid)
             {
@@ -281,7 +281,7 @@ namespace DaJet.Scripting
         {
             if (node.Binding is Type type && type == typeof(string))
             {
-                script.Append($"CAST({node.Identifier} AS mvarchar)");
+                script.Append($"CAST({node.Identifier} AS text)");
             }
             else
             {
@@ -294,7 +294,7 @@ namespace DaJet.Scripting
 
             if (node.Binding is Type type && type == typeof(string))
             {
-                script.Append($"CAST({identifier} AS mvarchar)");
+                script.Append($"CAST({identifier} AS text)");
             }
             else
             {

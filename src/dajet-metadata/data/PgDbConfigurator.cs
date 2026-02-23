@@ -764,6 +764,20 @@ namespace DaJet.Data
                     property.PropertyType.NumericPrecision = 10;
                     property.PropertyType.NumericScale = 0;
                 }
+                else if (DATA_TYPE == "bigint")
+                {
+                    property.PropertyType.CanBeNumeric = true;
+                    property.PropertyType.NumericKind = NumericKind.CanBeNegative;
+                    property.PropertyType.NumericPrecision = 19;
+                    property.PropertyType.NumericScale = 0;
+                }
+                else if (DATA_TYPE == "smallint")
+                {
+                    property.PropertyType.CanBeNumeric = true;
+                    property.PropertyType.NumericKind = NumericKind.CanBeNegative;
+                    property.PropertyType.NumericPrecision = 5;
+                    property.PropertyType.NumericScale = 0;
+                }
 
                 table.Properties.Add(property);
             }

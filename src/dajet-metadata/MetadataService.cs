@@ -4,6 +4,7 @@ using DaJet.Data.SqlServer;
 using DaJet.Metadata.Core;
 using DaJet.Metadata.Model;
 using DaJet.Metadata.Parsers;
+using DaJet.Metadata.PostgreSql;
 using DaJet.Metadata.SqlServer;
 using DaJet.Model;
 using System;
@@ -214,7 +215,7 @@ namespace DaJet.Metadata
             }
             else if (options.DatabaseProvider == DatabaseProvider.PostgreSql)
             {
-                throw new NotImplementedException();
+                provider = new PgMetadataProvider(options.ConnectionString);
             }
             else
             {
