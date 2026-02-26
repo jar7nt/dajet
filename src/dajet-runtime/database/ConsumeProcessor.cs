@@ -15,6 +15,15 @@ namespace DaJet.Runtime
         private bool CanDispose { get { return Interlocked.CompareExchange(ref _state, STATE_DISPOSING, STATE_ACTIVE) == STATE_ACTIVE; } }
 
         private AutoResetEvent _sleep;
+        private static bool IsTransientRabbitError(in Exception error)
+        {
+            if (error is null || string.IsNullOrWhiteSpace(error.Message))
+            {
+                return false;
+            }
+
+            return error.Message.StartsWith("RabbitMQ transient error", StringComparison.OrdinalIgnoreCase);
+        }
         public ConsumeProcessor(in ScriptScope scope) : base(in scope) { }
         public override void Synchronize() { /* IGNORE */ }
         public override void Process()
@@ -52,9 +61,16 @@ namespace DaJet.Runtime
                 }
                 catch (Exception error)
                 {
-                    delay = 60;
-
-                    FileLogger.Default.Write(error);
+                    if (IsTransientRabbitError(in error))
+                    {
+                        delay = 5;
+                        FileLogger.Default.Write(error.Message);
+                    }
+                    else
+                    {
+                        delay = 60;
+                        FileLogger.Default.Write(error);
+                    }
                 }
                 finally
                 {

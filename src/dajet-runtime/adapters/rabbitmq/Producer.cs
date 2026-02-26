@@ -2,7 +2,10 @@
 using DaJet.Scripting.Model;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
+using RabbitMQ.Client.Exceptions;
 using System.Buffers;
+using System.Globalization;
+using System.Net.Sockets;
 using System.Text;
 using System.Web;
 
@@ -20,7 +23,6 @@ namespace DaJet.Runtime.RabbitMQ
         private const int STATE_BROKEN = 2;
         private const int STATE_DISPOSING = 3;
 
-        private const string ERROR_STATE_IS_BROKEN = "Broken state";
         private const string ERROR_CHANNEL_SHUTDOWN = "Channel shutdown: [{0}] {1}";
         private const string ERROR_CONNECTION_SHUTDOWN = "Connection shutdown: [{0}] {1}";
         private const string ERROR_CONNECTION_IS_BLOCKED = "Connection blocked: {0}";
@@ -62,29 +64,54 @@ namespace DaJet.Runtime.RabbitMQ
         private string UserName { get; set; } = "guest";
         private string Password { get; set; } = "guest";
         private TimeSpan PublisherConfirmsTimeout { get; set; } = TimeSpan.FromSeconds(60);
-        private TimeSpan GetPublisherConfirmsTimeout()
+        private static bool TryConvertToSeconds(in object value, out int seconds)
         {
-            if (StreamFactory.TryGetOption(in _scope, "PublisherConfirmsTimeout", out object value))
+            seconds = 0;
+
+            if (value is null) { return false; }
+
+            if (value is int integer)
             {
-                if (value is int seconds)
+                seconds = integer; return true;
+            }
+            else if (value is long longint && longint <= int.MaxValue && longint >= int.MinValue)
+            {
+                seconds = (int)longint; return true;
+            }
+            else if (value is decimal number && number <= int.MaxValue && number >= int.MinValue)
+            {
+                seconds = decimal.ToInt32(number); return true;
+            }
+            else if (value is double floating && floating <= int.MaxValue && floating >= int.MinValue)
+            {
+                seconds = (int)floating; return true;
+            }
+            else if (int.TryParse(value.ToString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int parsed))
+            {
+                seconds = parsed; return true;
+            }
+
+            return false;
+        }
+        private int GetSecondsOption(in string option, int defaultValue)
+        {
+            if (StreamFactory.TryGetOption(in _scope, option, out object value))
+            {
+                if (TryConvertToSeconds(in value, out int seconds) && seconds > 0)
                 {
-                    return TimeSpan.FromSeconds(seconds);
+                    return seconds;
                 }
             }
 
-            return TimeSpan.FromSeconds(60);
+            return defaultValue;
+        }
+        private TimeSpan GetPublisherConfirmsTimeout()
+        {
+            return TimeSpan.FromSeconds(GetSecondsOption("PublisherConfirmsTimeout", 60));
         }
         private TimeSpan GetRequestedHeartbeat()
         {
-            if (StreamFactory.TryGetOption(in _scope, "RequestedHeartbeat", out object value))
-            {
-                if (value is int seconds)
-                {
-                    return TimeSpan.FromSeconds(seconds);
-                }
-            }
-
-            return TimeSpan.FromSeconds(60);
+            return TimeSpan.FromSeconds(GetSecondsOption("RequestedHeartbeat", 60));
         }
         private bool GetAutomaticRecoveryEnabled()
         {
@@ -100,39 +127,15 @@ namespace DaJet.Runtime.RabbitMQ
         }
         private TimeSpan GetNetworkRecoveryInterval()
         {
-            if (StreamFactory.TryGetOption(in _scope, "NetworkRecoveryInterval", out object value))
-            {
-                if (value is int seconds)
-                {
-                    return TimeSpan.FromSeconds(seconds);
-                }
-            }
-
-            return TimeSpan.FromSeconds(5);
+            return TimeSpan.FromSeconds(GetSecondsOption("NetworkRecoveryInterval", 5));
         }
         private TimeSpan GetContinuationTimeout()
         {
-            if (StreamFactory.TryGetOption(in _scope, "ContinuationTimeout", out object value))
-            {
-                if (value is int seconds)
-                {
-                    return TimeSpan.FromSeconds(seconds);
-                }
-            }
-
-            return TimeSpan.FromSeconds(30);
+            return TimeSpan.FromSeconds(GetSecondsOption("ContinuationTimeout", 30));
         }
         private TimeSpan GetRequestedConnectionTimeout()
         {
-            if (StreamFactory.TryGetOption(in _scope, "RequestedConnectionTimeout", out object value))
-            {
-                if (value is int seconds)
-                {
-                    return TimeSpan.FromSeconds(seconds);
-                }
-            }
-
-            return TimeSpan.FromSeconds(30);
+            return TimeSpan.FromSeconds(GetSecondsOption("RequestedConnectionTimeout", 30));
         }
         #endregion
 
@@ -444,12 +447,9 @@ namespace DaJet.Runtime.RabbitMQ
                 }
             }
         }
-        private void ThrowIfSessionIsBroken()
+        private bool IsSessionBroken()
         {
-            if (Interlocked.CompareExchange(ref _state, STATE_BROKEN, STATE_BROKEN) == STATE_BROKEN)
-            {
-                throw new InvalidOperationException(ERROR_STATE_IS_BROKEN);
-            }
+            return Interlocked.CompareExchange(ref _state, STATE_BROKEN, STATE_BROKEN) == STATE_BROKEN;
         }
         private void SetSessionToBrokenState(string error)
         {
@@ -458,21 +458,103 @@ namespace DaJet.Runtime.RabbitMQ
                 FileLogger.Default.Write(error);
             }
         }
+        private void RecoverBrokenSession()
+        {
+            if (!IsSessionBroken())
+            {
+                return;
+            }
+
+            try
+            {
+                DisposeProducer();
+            }
+            finally
+            {
+                _ = Interlocked.Exchange(ref _state, STATE_IDLE);
+            }
+        }
+        private static T FindInnerException<T>(in Exception error) where T : Exception
+        {
+            Exception current = error;
+
+            while (current is not null)
+            {
+                if (current is T found)
+                {
+                    return found;
+                }
+                current = current.InnerException;
+            }
+
+            return null;
+        }
+        private static bool TryGetTransientErrorMessage(in Exception error, out string message)
+        {
+            message = null;
+
+            if (error is null) { return false; }
+
+            AlreadyClosedException closed = FindInnerException<AlreadyClosedException>(in error);
+            if (closed?.ShutdownReason is not null)
+            {
+                message = $"RabbitMQ transient error [{closed.ShutdownReason.ReplyCode}] {closed.ShutdownReason.ReplyText}";
+                return true;
+            }
+
+            OperationInterruptedException interrupted = FindInnerException<OperationInterruptedException>(in error);
+            if (interrupted?.ShutdownReason is not null)
+            {
+                message = $"RabbitMQ transient error [{interrupted.ShutdownReason.ReplyCode}] {interrupted.ShutdownReason.ReplyText}";
+                return true;
+            }
+
+            SocketException socket = FindInnerException<SocketException>(in error);
+            if (socket is not null)
+            {
+                message = $"RabbitMQ transient error [socket {(int)socket.SocketErrorCode}] {socket.Message}";
+                return true;
+            }
+
+            if (FindInnerException<System.IO.IOException>(in error) is not null)
+            {
+                message = "RabbitMQ transient error: transport I/O failure";
+                return true;
+            }
+
+            if (FindInnerException<BrokerUnreachableException>(in error) is not null)
+            {
+                message = "RabbitMQ transient error: broker is unreachable";
+                return true;
+            }
+
+            return false;
+        }
+        private static Exception NormalizeException(in Exception error)
+        {
+            if (TryGetTransientErrorMessage(in error, out string message))
+            {
+                return new InvalidOperationException(message);
+            }
+
+            return error;
+        }
         #endregion
 
         public void Process()
         {
             try
             {
-                ThrowIfSessionIsBroken(); // STATE_BROKEN
+                RecoverBrokenSession(); // STATE_BROKEN -> STATE_IDLE
 
                 BeginSessionOrThrow(); // STATE_IDLE -> STATE_ACTIVE
 
                 PublishMessageOrThrow(); // STATE_ACTIVE
             }
-            catch
+            catch (Exception error)
             {
-                Dispose(); throw; // STATE_DISPOSING -> STATE_IDLE
+                Dispose();
+                throw NormalizeException(in error);
             }
         }
         private void PublishMessageOrThrow()
@@ -487,9 +569,9 @@ namespace DaJet.Runtime.RabbitMQ
                 {
                     throw new ObjectDisposedException(typeof(Producer).ToString());
                 }
-                catch
+                catch (Exception error)
                 {
-                    throw;
+                    throw NormalizeException(in error);
                 }
             }
             else
@@ -605,7 +687,10 @@ namespace DaJet.Runtime.RabbitMQ
             {
                 FileLogger.Default.Write("RabbitMQ Publisher synchronizing ...");
 
-                ThrowIfSessionIsBroken(); // STATE_BROKEN
+                if (IsSessionBroken())
+                {
+                    throw new InvalidOperationException("RabbitMQ transient error: session is broken");
+                }
 
                 ConfirmSessionOrThrow(); // STATE_ACTIVE
 
@@ -615,9 +700,9 @@ namespace DaJet.Runtime.RabbitMQ
             {
                 throw new ObjectDisposedException(typeof(Producer).ToString());
             }
-            catch
+            catch (Exception error)
             {
-                throw;
+                throw NormalizeException(in error);
             }
             finally
             {
@@ -628,17 +713,27 @@ namespace DaJet.Runtime.RabbitMQ
         {
             if (Interlocked.CompareExchange(ref _state, STATE_ACTIVE, STATE_ACTIVE) == STATE_ACTIVE)
             {
-                if (_channel.WaitForConfirms(PublisherConfirmsTimeout, out bool timedout))
+                try
                 {
-                    ThrowIfSessionIsBroken(); // STATE_BROKEN
+                    if (_channel.WaitForConfirms(PublisherConfirmsTimeout, out bool timedout))
+                    {
+                        if (IsSessionBroken())
+                        {
+                            throw new InvalidOperationException("RabbitMQ transient error: session was closed during confirms");
+                        }
+                    }
+                    else if (timedout)
+                    {
+                        throw new OperationCanceledException(ERROR_WAIT_FOR_CONFIRMS);
+                    }
+                    else
+                    {
+                        throw new OperationCanceledException(ERROR_PUBLISHER_CONFIRMS);
+                    }
                 }
-                else if (timedout)
+                catch (Exception error)
                 {
-                    throw new OperationCanceledException(ERROR_WAIT_FOR_CONFIRMS);
-                }
-                else
-                {
-                    throw new OperationCanceledException(ERROR_PUBLISHER_CONFIRMS);
+                    throw NormalizeException(in error);
                 }
             }
             else
