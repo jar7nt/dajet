@@ -630,6 +630,8 @@ namespace DaJet.Runtime.RabbitMQ
             {
                 bool acked = _channel.WaitForConfirms(PublisherConfirmsTimeout, out bool timedout);
 
+                ThrowIfSessionIsBroken(); // STATE_BROKEN
+
                 if (timedout)
                 {
                     throw new OperationCanceledException(ERROR_WAIT_FOR_CONFIRMS);
@@ -640,7 +642,6 @@ namespace DaJet.Runtime.RabbitMQ
                     throw new OperationCanceledException(ERROR_PUBLISHER_CONFIRMS);
                 }
 
-                ThrowIfSessionIsBroken(); // STATE_BROKEN
             }
             else
             {
